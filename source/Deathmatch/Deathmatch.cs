@@ -33,7 +33,8 @@ public partial class Deathmatch : BasePlugin, IPluginConfig<DeathmatchConfig>
         var API = new Deathmatch();
         Capabilities.RegisterPluginCapability(DeathmatchAPI, () => API);
         VirtualFunctions.CCSPlayer_ItemServices_CanAcquireFunc.Hook(OnWeaponCanAcquire, HookMode.Pre);
-        VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Hook(OnTakeDamage, HookMode.Pre);
+        // VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Hook(OnTakeDamage, HookMode.Pre);
+		RegisterListener<OnEntityTakeDamagePre>(OnEntityTakeDamagePre);
 
         if (Config.SaveWeapons)
             _ = CreateDatabaseConnection();
@@ -321,7 +322,8 @@ public partial class Deathmatch : BasePlugin, IPluginConfig<DeathmatchConfig>
     public override void Unload(bool hotReload)
     {
         VirtualFunctions.CCSPlayer_ItemServices_CanAcquireFunc.Unhook(OnWeaponCanAcquire, HookMode.Pre);
-        VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Unhook(OnTakeDamage, HookMode.Pre);
+        // VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Unhook(OnTakeDamage, HookMode.Pre);
+		RemoveListener<OnEntityTakeDamagePre>(OnEntityTakeDamagePre);
     }
 
     public void SetupCustomMode(string modeId)
