@@ -369,17 +369,38 @@ namespace Deathmatch
 
 		private HookResult OnWeaponCanAcquire(DynamicHook hook)
 		{
-			var vdata = VirtualFunctions.GetCSWeaponDataFromKey.Invoke(-1, hook.GetParam<CEconItemView>(1).ItemDefinitionIndex.ToString());
-			var player = hook.GetParam<CCSPlayer_ItemServices>(0).Pawn.Value.Controller.Value?.As<CCSPlayerController>();
-
-			if (vdata == null || player == null || !player.IsValid)
+			var item = hook.GetParam<CEconItemView>(1);
+			if (item == null || item.Handle == IntPtr.Zero)
 				return HookResult.Continue;
 
+			var services = hook.GetParam<CCSPlayer_ItemServices>(0);
+			// FIX: PointerTo requires checking .Value first
+			if (services == null || services.Pawn.Value == null)
+				return HookResult.Continue;
+
+
+			var pawn = services.Pawn.Value.As<CCSPlayerPawn>();
+			// FIX: Check pawn.IsValid and Controller.Value safely
+			if (pawn == null || !pawn.IsValid || pawn.Controller.Value == null)
+				return HookResult.Continue;
+
+			var player = pawn.Controller.Value.As<CCSPlayerController>();
+			if (player == null || !player.IsValid)
+				return HookResult.Continue;
+
+			string weaponName = GetSafeWeaponName(item.ItemDefinitionIndex);
+			if (weaponName == "unknown")
+			{
+				// If it's a custom knife or unknown item, just let them have it to avoid crashing
+				return HookResult.Continue;
+			}
+
+			// --- ORIGINAL LOGIC ---
 			if (hook.GetParam<AcquireMethod>(2) == AcquireMethod.PickUp)
 			{
-				if (!ActiveMode.PrimaryWeapons.Contains(vdata.Name) && !ActiveMode.SecondaryWeapons.Contains(vdata.Name))
+				if (!ActiveMode.PrimaryWeapons.Contains(weaponName) && !ActiveMode.SecondaryWeapons.Contains(weaponName))
 				{
-					if (vdata.Name.Contains("knife") || vdata.Name.Contains("bayonet") || ActiveMode.Utilities.Contains(vdata.Name))
+					if (weaponName.Contains("knife") || weaponName.Contains("bayonet") || ActiveMode.Utilities.Contains(weaponName))
 						return HookResult.Continue;
 
 					hook.SetReturn(AcquireResult.AlreadyOwned);
@@ -403,14 +424,14 @@ namespace Deathmatch
 				return HookResult.Handled;
 			}
 
-			if (!ActiveMode.PrimaryWeapons.Contains(vdata.Name) && !ActiveMode.SecondaryWeapons.Contains(vdata.Name))
+			if (!ActiveMode.PrimaryWeapons.Contains(weaponName) && !ActiveMode.SecondaryWeapons.Contains(weaponName))
 			{
 				if (!player.IsBot)
 				{
 					if (!string.IsNullOrEmpty(Config.SoundSettings.CantEquipSound))
 						player.ExecuteClientCommand("play " + Config.SoundSettings.CantEquipSound);
 
-					string replacedweaponName = Localizer[vdata.Name];
+					string replacedweaponName = Localizer[weaponName];
 					player.PrintToChat($"{Localizer["Chat.Prefix"]} {Localizer["Chat.WeaponIsDisabled", replacedweaponName]}");
 				}
 				hook.SetReturn(AcquireResult.AlreadyPurchased);
@@ -419,34 +440,34 @@ namespace Deathmatch
 
 			if (playerData.TryGetValue(player.Slot, out var data))
 			{
-				string localizerWeaponName = Localizer[vdata.Name];
+				string localizerWeaponName = Localizer[weaponName];
 				bool IsVIP = AdminManager.PlayerHasPermissions(player, Config.PlayersSettings.VIPFlag);
 
-				bool IsPrimary = PrimaryWeaponsList.Contains(vdata.Name);
-				if (CheckIsWeaponRestricted(vdata.Name, IsVIP, player.Team, ActiveMode.PrimaryWeapons, ActiveCustomMode, IsPrimary))
+				bool IsPrimary = PrimaryWeaponsList.Contains(weaponName);
+				if (CheckIsWeaponRestricted(weaponName, IsVIP, player.Team, ActiveMode.PrimaryWeapons, ActiveCustomMode, IsPrimary))
 				{
 					if (!string.IsNullOrEmpty(Config.SoundSettings.CantEquipSound))
 						player.ExecuteClientCommand("play " + Config.SoundSettings.CantEquipSound);
 
-					(int NonVIP, int VIP) restrictInfo = GetRestrictData(vdata.Name, player.Team);
+					(int NonVIP, int VIP) restrictInfo = GetRestrictData(weaponName, player.Team);
 					player.PrintToChat($"{Localizer["Chat.Prefix"]} {Localizer["Chat.WeaponIsRestricted", localizerWeaponName, GetWeaponRestrictLozalizer(restrictInfo.NonVIP), GetWeaponRestrictLozalizer(restrictInfo.VIP)]}");
 					hook.SetReturn(AcquireResult.NotAllowedByMode);
 					return HookResult.Handled;
 				}
 
-				var pawn = player.PlayerPawn.Value;
+				var p = player.PlayerPawn.Value;
 				if (IsPrimary)
 				{
-					if (data.PrimaryWeapon.TryGetValue(ActiveCustomMode, out var primaryWeapon) && vdata.Name == primaryWeapon)
+					if (data.PrimaryWeapon.TryGetValue(ActiveCustomMode, out var primaryWeapon) && weaponName == primaryWeapon)
 					{
 						player.PrintToChat($"{Localizer["Chat.Prefix"]} {Localizer["Chat.WeaponsIsAlreadySet", localizerWeaponName]}");
 						hook.SetReturn(AcquireResult.AlreadyOwned);
 						return HookResult.Handled;
 					}
-					data.PrimaryWeapon[ActiveCustomMode] = vdata.Name;
+					data.PrimaryWeapon[ActiveCustomMode] = weaponName;
 					player.PrintToChat($"{Localizer["Chat.Prefix"]} {Localizer["Chat.PrimaryWeaponSet", localizerWeaponName]}");
 
-					var weapon = pawn?.GetWeaponFromSlot(gear_slot_t.GEAR_SLOT_RIFLE);
+					var weapon = p?.GetWeaponFromSlot(gear_slot_t.GEAR_SLOT_RIFLE);
 					if (!Config.Gameplay.SwitchWeapons && weapon != null)
 					{
 						hook.SetReturn(AcquireResult.AlreadyOwned);
@@ -455,16 +476,16 @@ namespace Deathmatch
 				}
 				else
 				{
-					if (data.SecondaryWeapon.TryGetValue(ActiveCustomMode, out var secondaryWeapon) && vdata.Name == secondaryWeapon)
+					if (data.SecondaryWeapon.TryGetValue(ActiveCustomMode, out var secondaryWeapon) && weaponName == secondaryWeapon)
 					{
 						player.PrintToChat($"{Localizer["Chat.Prefix"]} {Localizer["Chat.WeaponsIsAlreadySet", localizerWeaponName]}");
 						hook.SetReturn(AcquireResult.AlreadyOwned);
 						return HookResult.Handled;
 					}
-					data.SecondaryWeapon[ActiveCustomMode] = vdata.Name;
+					data.SecondaryWeapon[ActiveCustomMode] = weaponName;
 					player.PrintToChat($"{Localizer["Chat.Prefix"]} {Localizer["Chat.SecondaryWeaponSet", localizerWeaponName]}");
 
-					var weapon = pawn?.GetWeaponFromSlot(gear_slot_t.GEAR_SLOT_PISTOL);
+					var weapon = p?.GetWeaponFromSlot(gear_slot_t.GEAR_SLOT_PISTOL);
 					if (!Config.Gameplay.SwitchWeapons && weapon != null)
 					{
 						hook.SetReturn(AcquireResult.AlreadyOwned);
@@ -473,6 +494,58 @@ namespace Deathmatch
 				}
 			}
 			return HookResult.Continue;
+		}
+
+		private string GetSafeWeaponName(ushort index)
+		{
+			return index switch
+			{
+				1 => "weapon_deagle",
+				2 => "weapon_elite",
+				3 => "weapon_fiveseven",
+				4 => "weapon_glock",
+				7 => "weapon_ak47",
+				8 => "weapon_aug",
+				9 => "weapon_awp",
+				10 => "weapon_famas",
+				11 => "weapon_g3sg1",
+				13 => "weapon_galilar",
+				14 => "weapon_m249",
+				16 => "weapon_m4a1",
+				17 => "weapon_mac10",
+				19 => "weapon_p90",
+				23 => "weapon_mp5sd",
+				24 => "weapon_ump45",
+				25 => "weapon_xm1014",
+				26 => "weapon_bizon",
+				27 => "weapon_mag7",
+				28 => "weapon_negev",
+				29 => "weapon_sawedoff",
+				30 => "weapon_tec9",
+				31 => "weapon_taser",
+				32 => "weapon_hkp2000",
+				33 => "weapon_mp7",
+				34 => "weapon_mp9",
+				35 => "weapon_nova",
+				36 => "weapon_p250",
+				38 => "weapon_scar20",
+				39 => "weapon_sg556",
+				40 => "weapon_ssg08",
+				42 => "weapon_knife",
+				43 => "weapon_flashbang",
+				44 => "weapon_hegrenade",
+				45 => "weapon_smokegrenade",
+				46 => "weapon_molotov",
+				47 => "weapon_decoy",
+				48 => "weapon_incgrenade",
+				49 => "weapon_c4",
+				59 => "weapon_knife_t",
+				60 => "weapon_m4a1_silencer",
+				61 => "weapon_usp_silencer",
+				63 => "weapon_cz75a",
+				64 => "weapon_revolver",
+				_ => "unknown"
+			};
 		}
 
 		[GameEventHandler]
