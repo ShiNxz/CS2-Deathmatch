@@ -1,0 +1,112 @@
+name: release
+
+on:
+  # A release for every push to main that changes the plugin - not for docs alone
+  push:
+    branches: [ main ]
+    paths-ignore: [ '**.md', 'LICENSE', '.gitignore', 'docs/**', 'Custom Modes Examples/**' ]
+  pull_request:
+  workflow_dispatch:
+
+# Pushes and manual runs share one group, so two of them can never read the same "latest release"
+# and both try to create the same tag. PRs get a group of their own - a PR run queued in the release
+# group would cancel a pending release run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'release' }}
+  cancel-in-progress: false
+
+env:
+  # CounterStrikeSharp loads plugins/<name>/<name>.dll, so the folder name must match the AssemblyName.
+  PLUGIN: Deathmatch
+  PROJECT: source/Deathmatch/Deathmatch.csproj
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # GITHUB_TOKEN defaults to read-only on repos created since 2023, so creating a release fails
+    # with 403 unless this is granted explicitly.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # CopyLocalLockFileAssemblies puts MySqlConnector and Newtonsoft.Json in the output - the plugin
+      # loads both from its own folder. It copies CounterStrikeSharp's dependencies too, which the
+      # allowlist below leaves behind.
+      - name: Build
+        run: dotnet build "$PROJECT" -c Release --nologo -p:CopyLocalLockFileAssemblies=true -o build-out
+
+      # The plugin folder as it sits under addons/counterstrikesharp/plugins/, with its lang and spawn
+      # files, and DeathmatchAPI in shared/ where the modules resolve it from.
+      - name: Stage release layout
+        run: |
+          set -e
+          mkdir -p "out/$PLUGIN/lang" "out/$PLUGIN/spawns" out/shared/DeathmatchAPI
+          cp "build-out/$PLUGIN.dll" "build-out/$PLUGIN.deps.json" build-out/MySqlConnector.dll build-out/Newtonsoft.Json.dll "out/$PLUGIN/"
+          cp Lang/*.json "out/$PLUGIN/lang/"
+          cp "Spawns Locations"/*.json "out/$PLUGIN/spawns/"
+          cp build-out/DeathmatchAPI.dll out/shared/DeathmatchAPI/
+
+      - name: Verify the layout
+        run: |
+          set -e
+          test -f "out/$PLUGIN/$PLUGIN.dll"
+          test -f "out/$PLUGIN/lang/en.json"
+          test -f out/shared/DeathmatchAPI/DeathmatchAPI.dll
+
+          # Stage only copies what it lists. A new package would build fine and then fail to load on
+          # the server, so refuse to go on until its dlls are added to Stage.
+          extra=$(grep -oE '<PackageReference Include="[^"]+"' "$PROJECT" | cut -d'"' -f2 | grep -viE '^(CounterStrikeSharp.API|MySqlConnector|Newtonsoft.Json)$' || true)
+          if [ -n "$extra" ]; then
+            echo "::error::Unhandled PackageReference: $extra - add its dlls to the Stage step."
+            exit 1
+          fi
+
+          find out -type f | sort
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PLUGIN }}
+          path: out/
+
+      # Everything below only on main (push or manual run). PRs build and stop.
+      - name: Work out the next version
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          # Highest v<N> across releases and tags, compared as numbers (v10 beats v9). Other tags -
+          # upstream's v1.2.9 and the rest, which came with the fork - are ignored.
+          releases=$(gh release list --limit 1000 --json tagName --jq '.[].tagName')
+          tags=$(git ls-remote --tags --refs origin | sed 's|.*refs/tags/||')
+          highest=$(printf '%s\n%s\n' "$releases" "$tags" | { grep -E '^v[0-9]+$' || true; } | sed 's/^v//' | sort -n | tail -1)
+          next=$(( ${highest:-0} + 1 ))
+
+          previous=${highest:+v$highest}
+          echo "previous: ${previous:-none}  next: v${next}"
+          echo "tag=v${next}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: cd out && zip -qr "../$PLUGIN-${{ steps.version.outputs.tag }}.zip" "$PLUGIN" shared -x '*.DS_Store'
+
+      - name: Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "$PLUGIN-${{ steps.version.outputs.tag }}.zip" \
+            --target "${{ github.sha }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
